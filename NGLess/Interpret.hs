@@ -1,4 +1,4 @@
-{- Copyright 2013-2020 NGLess Authors
+{- Copyright 2013-2021 NGLess Authors
  - License: MIT
  -}
 {-# LANGUAGE FlexibleContexts, CPP #-}
@@ -80,10 +80,10 @@ import           Control.DeepSeq (NFData(..))
 import qualified Data.Vector as V
 import           Safe (atMay)
 import           Control.Error (note)
+import           Text.Read (readEither)
 
 import System.IO
 import System.Directory
-import System.FilePath ((</>))
 import Data.List (find)
 import GHC.Conc                 (getNumCapabilities)
 
@@ -166,11 +166,11 @@ setlno !n = runNGLessIO $ updateNglEnvironment (\e -> e { ngleLno = Just n } )
 lookupVariable :: T.Text -> InterpretationROEnv (Maybe NGLessObject)
 lookupVariable !k = liftM2 (<|>)
     (lookupConstant k)
-    (variableMapLookup k . ieVariableEnv <$> ask)
+    (asks (variableMapLookup k . ieVariableEnv))
 
 lookupConstant :: T.Text -> InterpretationROEnv (Maybe NGLessObject)
 lookupConstant !k = do
-    constants <- concatMap modConstants . ieModules <$> ask
+    constants <- asks (concatMap modConstants . ieModules)
     case filter ((==k) . fst) constants of
         [] -> return Nothing
         [(_,v)] -> return (Just v)
@@ -313,8 +313,7 @@ interpretFunction :: FuncName -> Expression -> [(Variable, Expression)] -> Maybe
 interpretFunction (FuncName "preprocess") expr args (Just block) = do
     expr' <- runInROEnvIO $ interpretExpr expr
     args' <- interpretArguments args
-    res' <- executePreprocess expr' args' block
-    return res'
+    executePreprocess expr' args' block
 interpretFunction (FuncName "preprocess") expr _ _ = throwShouldNotOccur ("preprocess expected a variable holding a NGOReadSet, but received: " ++ show expr)
 interpretFunction f expr args block = do
     expr' <- interpretTopValue expr
@@ -335,8 +334,11 @@ interpretFunction' (FuncName "count")     expr args Nothing = runNGLessIO (execu
 interpretFunction' (FuncName "__check_count") expr args Nothing = runNGLessIO (executeCountCheck expr args)
 interpretFunction' (FuncName "countfile") expr args Nothing = runNGLessIO (executeCountFile expr args)
 interpretFunction' (FuncName "print")     expr args Nothing = executePrint expr args
+interpretFunction' (FuncName "read_int")  expr args Nothing = executeReadInt expr args
+interpretFunction' (FuncName "read_double")  expr args Nothing = executeReadDouble expr args
 interpretFunction' (FuncName "paired")   mate1 args Nothing = runNGLessIO (executePaired mate1 args)
 interpretFunction' (FuncName "select")    expr args (Just b) = executeSelectWBlock expr args b
+interpretFunction' (FuncName "__assert")  expr [] args       = executeAssert expr args
 interpretFunction' fname@(FuncName fname') expr args Nothing = do
     traceExpr ("executing module function: '"++T.unpack fname'++"'") expr
     execF <- findFunction fname
@@ -456,7 +458,7 @@ executePreprocess (NGOReadSet name (ReadSet pairs singles)) args (Block (Variabl
                             .| CAlg.asyncZstdTo 3 h
 
             let processpairs :: (V.Vector ShortRead, V.Vector ShortRead) -> NGLess (V.Vector ShortRead, V.Vector ShortRead, V.Vector ShortRead)
-                processpairs = liftM splitPreprocessPair . vMapMaybeLifted (runInterpretationRO env . intercalate keepSingles) . uncurry V.zip
+                processpairs = fmap splitPreprocessPair . vMapMaybeLifted (runInterpretationRO env . intercalate keepSingles) . uncurry V.zip
             (fp1', out1) <- openNGLTempFile "" "preprocessed.1." "fq.zst"
             (fp2', out2) <- openNGLTempFile "" "preprocessed.2." "fq.zst"
             (fp3', out3) <- openNGLTempFile "" "preprocessed.singles." "fq.zst"
@@ -516,6 +518,8 @@ executePreprocess v _ _ = unreachable ("executePreprocess: Cannot handle this in
 executeMethod :: MethodName -> NGLessObject -> Maybe NGLessObject -> [(T.Text, NGLessObject)] -> InterpretationROEnv NGLessObject
 executeMethod method (NGOMappedRead samline) arg kwargs = runNGLess (executeMappedReadMethod method samline arg kwargs)
 executeMethod method (NGOShortRead sr) arg kwargs = runNGLess (executeShortReadsMethod method sr arg kwargs)
+executeMethod (MethodName "to_string") (NGODouble val) _ _  = return . NGOString . T.pack . show $ val
+executeMethod (MethodName "to_string") (NGOInteger val) _ _ = return . NGOString . T.pack . show $ val
 executeMethod m self arg kwargs = throwShouldNotOccur ("Method " ++ show m ++ " with self="++show self ++ " arg="++ show arg ++ " kwargs="++show kwargs ++ " is not implemented")
 
 
@@ -533,6 +537,24 @@ interpretPBlock1 block var r = do
 executePrint :: NGLessObject -> [(T.Text, NGLessObject)] -> InterpretationEnvIO NGLessObject
 executePrint (NGOString s) [] = liftIO (T.putStr s) >> return NGOVoid
 executePrint err  _ = throwScriptError ("Cannot print " ++ show err)
+
+executeReadInt :: NGLessObject -> [(T.Text, NGLessObject)] -> InterpretationEnvIO NGLessObject
+executeReadInt (NGOString "") kwargs = NGOInteger <$> lookupIntegerOrScriptError "read_int" "on_empty_return" kwargs
+executeReadInt (NGOString s) _ = case readEither (T.unpack s) of
+    Right val -> return $! NGOInteger val
+    Left err -> throwDataError ("Could not parse integer from '"++T.unpack s++"'. Error: "++err)
+executeReadInt s _ = throwScriptError ("Cannot parse this object as integer: "++ show s)
+
+executeReadDouble :: NGLessObject -> [(T.Text, NGLessObject)] -> InterpretationEnvIO NGLessObject
+executeReadDouble (NGOString "") kwargs = NGODouble <$> lookupDoubleOrScriptError "read_int" "on_empty_return" kwargs
+executeReadDouble (NGOString s) _ = case readEither (T.unpack s) of
+    Right val -> return $! NGODouble val
+    Left err -> throwDataError ("Could not parse double from '"++T.unpack s++"'. Error: "++err)
+executeReadDouble s _ = throwScriptError ("Cannot parse this object as double: "++ show s)
+
+executeAssert (NGOBool True) _ = return NGOVoid
+executeAssert (NGOBool False) _ = throwScriptError "Assert failed"
+executeAssert _ _ = throwShouldNotOccur "Assert did not receive a boolean!"
 
 executeSelectWBlock :: NGLessObject -> [(T.Text, NGLessObject)] -> Block -> InterpretationEnvIO NGLessObject
 executeSelectWBlock input@NGOMappedReadSet{ nglSamFile = isam} args (Block (Variable var) body) = do
@@ -698,7 +720,7 @@ _evalUnary op v = nglTypeError ("invalid unary operation ("++show op++") on valu
 _evalIndex :: NGLessObject -> [Maybe NGLessObject] -> Either NGError NGLessObject
 _evalIndex (NGOList elems) [Just (NGOInteger ix)] = note (NGError ScriptError errmsg) $ atMay elems (fromInteger ix)
     where errmsg = "Accessing element "++show ix ++ " in list of size "++show (length elems) ++ "."
-_evalIndex sr index@[Just (NGOInteger a)] = _evalIndex sr $ (Just $ NGOInteger (a + 1)) : index
+_evalIndex sr index@[Just (NGOInteger a)] = _evalIndex sr $ Just (NGOInteger (a + 1)) : index
 _evalIndex (NGOShortRead sr) [Just (NGOInteger s), Nothing] = let s' = fromInteger s in
     return . NGOShortRead $ srSlice s' (srLength sr - s') sr
 _evalIndex (NGOShortRead sr) [Nothing, Just (NGOInteger e)] =
@@ -706,36 +728,4 @@ _evalIndex (NGOShortRead sr) [Nothing, Just (NGOInteger e)] =
 _evalIndex (NGOShortRead sr) [Just (NGOInteger s), Just (NGOInteger e)] =
     return . NGOShortRead $ srSlice (fromInteger s) (fromInteger $ e - s) sr
 _evalIndex _ _ = nglTypeError ("_evalIndex: invalid operation" :: String)
-
-
-asDouble :: NGLessObject -> NGLess Double
-asDouble (NGODouble d) = return d
-asDouble (NGOInteger i) = return $ fromIntegral i
-asDouble other = throwScriptError ("Expected numeric value, got: " ++ show other)
-
-
--- Binary Evaluation
-evalBinary :: BOp ->  NGLessObject -> NGLessObject -> Either NGError NGLessObject
-evalBinary BOpAdd (NGOInteger a) (NGOInteger b) = Right $ NGOInteger (a + b)
-evalBinary BOpAdd (NGOString a) (NGOString b) = Right $ NGOString (T.concat [a, b])
-evalBinary BOpAdd a b = (NGODouble .) . (+) <$> asDouble a <*> asDouble b
-evalBinary BOpMul (NGOInteger a) (NGOInteger b) = Right $ NGOInteger (a * b)
-evalBinary BOpMul a b = (NGODouble .) . (+) <$> asDouble a <*> asDouble b
-evalBinary BOpPathAppend a b = case (a,b) of
-    (NGOString pa, NGOString pb) -> return . NGOString $! T.pack (T.unpack pa </> T.unpack pb)
-    _ -> nglTypeError ("Operator </>: invalid arguments" :: String)
-
-evalBinary op a b = do
-        a' <- asDouble a
-        b' <- asDouble b
-        return . NGOBool $ cmp op a' b'
-    where
-        cmp BOpLT = (<)
-        cmp BOpGT = (>)
-        cmp BOpLTE = (<=)
-        cmp BOpGTE = (>=)
-        cmp BOpEQ = (==)
-        cmp BOpNEQ = (/=)
-        cmp _ = error "should never occur"
-
 

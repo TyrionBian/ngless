@@ -1,4 +1,4 @@
-{- Copyright 2013-2020 NGLess Authors
+{- Copyright 2013-2021 NGLess Authors
  - License: MIT
  -}
 {-# LANGUAGE FlexibleContexts #-}
@@ -23,6 +23,7 @@ import Control.Monad.Writer
 import Control.Applicative
 import           Data.String (fromString)
 import           Data.List (find, foldl')
+import           Data.Functor (($>))
 
 import Modules
 import Language
@@ -119,7 +120,7 @@ envLookup' v = liftM2 (<|>)
 
 constantLookup :: T.Text -> TypeMSt (Maybe NGLType)
 constantLookup v = do
-    moduleBuiltins <- concatMap modConstants <$> ask
+    moduleBuiltins <- asks (concatMap modConstants)
     case filter ((==v) . fst) moduleBuiltins of
         [] -> return Nothing
         [(_,r)] -> return $ typeOfObject r
@@ -140,7 +141,7 @@ check_assignment a b = when (a /= b)
 
 nglTypeOf :: Expression -> TypeMSt (Maybe NGLType)
 nglTypeOf (FunctionCall f arg args b) = inferBlock f b *> checkFuncKwArgs f args *> checkFuncUnnamed f arg
-nglTypeOf (MethodCall m self arg args) = checkmethodargs m args *> checkmethodcall m self arg
+nglTypeOf (MethodCall m self arg args) = checkmethodcall m self arg args
 nglTypeOf (Lookup mt (Variable v)) = envLookup mt v
 nglTypeOf (BuiltinConstant (Variable v)) = return (typeOfConstant v)
 nglTypeOf (ConstStr _) = return (Just NGLString)
@@ -200,14 +201,21 @@ checkbop BOpAdd a b = do
     return t
 checkbop BOpMul a b = checknum a *> checknum b
 
-checkbop BOpGT  a b = checknum a *> checknum b *> return (Just NGLBool)
-checkbop BOpGTE a b = checknum a *> checknum b *> return (Just NGLBool)
-checkbop BOpLT  a b = checknum a *> checknum b *> return (Just NGLBool)
-checkbop BOpLTE a b = checknum a *> checknum b *> return (Just NGLBool)
-checkbop BOpEQ  a b = checknum a *> checknum b *> return (Just NGLBool)
-checkbop BOpNEQ a b = checknum a *> checknum b *> return (Just NGLBool)
+checkbop BOpGT  a b = checknum a *> checknum b $> Just NGLBool
+checkbop BOpGTE a b = checknum a *> checknum b $> Just NGLBool
+checkbop BOpLT  a b = checknum a *> checknum b $> Just NGLBool
+checkbop BOpLTE a b = checknum a *> checknum b $> Just NGLBool
+checkbop BOpPathAppend a b = softCheck NGLString a *> softCheck NGLString b $> Just NGLString
+checkbop BOpNEQ  a b = checkbop BOpEQ a b
+checkbop BOpEQ  a b = do
+    t <- liftM3 (\x y z -> x <|> y <|> z)
+        (softCheckPair NGLInteger a b)
+        (softCheckPair NGLDouble a b)
+        (softCheckPair NGLString a b)
+    when (isNothing t) $
+        errorInLineC ["Comparison operators (== or !=) must be applied to a pair of strings or numbers"]
+    return (Just NGLBool)
 
-checkbop BOpPathAppend a b = softCheck NGLString a *> softCheck NGLString b *> return (Just NGLString)
 
 softCheck :: NGLType -> Expression -> TypeMSt (Maybe NGLType)
 softCheck expected expr = do
@@ -272,7 +280,7 @@ checkindexable expr = do
             return $ Just NGLVoid
 
 allFunctions = (builtinFunctions ++) <$> moduleFunctions
-moduleFunctions = concatMap modFunctions <$> ask
+moduleFunctions = asks (concatMap modFunctions)
 
 funcInfo fn = do
     fs <- allFunctions
@@ -286,15 +294,24 @@ funcInfo fn = do
             errorInLineC ["Too many matches for function '", show fn, "'"]
             cannotContinue
 
-findMethodInfo :: MethodName -> TypeMSt MethodInfo
-findMethodInfo m =  case filter ((==m) . methodName) builtinMethods of
-                     [mi] -> return mi
-                     _ -> do
-                        errorInLineC
-                                    ["Cannot find method `", T.unpack (unwrapMethodName m), "`. "
-                                    ,T.unpack $ suggestionMessage (unwrapMethodName m) ((unwrapMethodName . methodName) <$> builtinMethods)
-                                    ]
-                        cannotContinue
+findMethodInfo :: MethodName -> Expression -> TypeMSt MethodInfo
+findMethodInfo m self =  case filter ((==m) . methodName) builtinMethods of
+    [mi] -> return mi
+    ms@(_:_) -> nglTypeOf self >>= \case
+        Nothing -> do
+            errorInLineC ["Cannot disambiguate method `", T.unpack (unwrapMethodName m), "` as it is called on an expression of unknown type (", show self, ")."]
+            cannotContinue
+        Just selfType -> case filter (\mi -> methodSelfType mi == selfType) ms of
+            [mi] -> return mi
+            _ -> do
+                errorInLineC ["Cannot disambiguate method `", T.unpack (unwrapMethodName m), "` as it was called on an unsupported type"]
+                cannotContinue
+    _ -> do
+        errorInLineC
+            ["Cannot find method `", T.unpack (unwrapMethodName m), "`. "
+            ,T.unpack $ suggestionMessage (unwrapMethodName m) ((unwrapMethodName . methodName) <$> builtinMethods)
+            ]
+        cannotContinue
 
 checkFuncUnnamed :: FuncName -> Expression -> TypeMSt (Maybe NGLType)
 checkFuncUnnamed f arg = do
@@ -303,8 +320,8 @@ checkFuncUnnamed f arg = do
         case metype of
             Just etype -> case targ of
                 Just (NGList t)
-                    | allowAutoComp -> checkfunctype etype t *> return (Just (NGList rtype))
-                Just t -> checkfunctype etype t *> return (Just rtype)
+                    | allowAutoComp -> checkfunctype etype t $> Just (NGList rtype)
+                Just t -> checkfunctype etype t $> Just rtype
                 Nothing -> do
                     errorInLineC ["While checking types for function ", show f, ".\n\tCould not infer type of argument (saw :", show arg, ")"]
                     cannotContinue
@@ -349,9 +366,9 @@ requireType def_t e = nglTypeOf e >>= \case
         return def_t
     Just t -> return t
 
-checkmethodcall :: MethodName -> Expression -> Maybe Expression -> TypeMSt (Maybe NGLType)
-checkmethodcall m self arg = do
-    minfo <- findMethodInfo m
+checkmethodcall :: MethodName -> Expression -> Maybe Expression -> [(Variable, Expression)] -> TypeMSt (Maybe NGLType)
+checkmethodcall m self arg args = do
+    minfo <- findMethodInfo m self
     let reqSelfType = methodSelfType minfo
         reqArgType = methodArgType minfo
     stype <- requireType reqSelfType self
@@ -364,17 +381,15 @@ checkmethodcall m self arg = do
         (Just _, Nothing) -> errorInLineC ["Method ", show m, " does not take any unnamed argument (saw ", show arg, ")"]
         (Just t, Just t') -> when (t /= t') (errorInLineC
                         ["Method ", show m, " expects type ", show t', " got ", show t])
-    return . Just . methodReturnType $ minfo
 
-checkmethodargs :: MethodName -> [(Variable, Expression)] -> TypeMSt ()
-checkmethodargs m args = do
-        ainfo <- methodKwargsInfo <$> findMethodInfo m
-        forM_ args (check1arg (concat ["method '", show m, "'"]) ainfo)
-        forM_ (filter argRequired ainfo) $ \ai ->
-            case filter (\(Variable v,_) -> v == argName ai) args of
-                [_] -> return ()
-                [] -> errorInLineC ["Required argument ", T.unpack (argName ai), " is missing in method call ", show m, "."]
-                _ -> error "This should never happen: multiple arguments with the same name should have been caught before"
+    let ainfo = methodKwargsInfo minfo
+    forM_ args (check1arg (concat ["method '", show m, "'"]) ainfo)
+    forM_ (filter argRequired ainfo) $ \ai ->
+        case filter (\(Variable v,_) -> v == argName ai) args of
+            [_] -> return ()
+            [] -> errorInLineC ["Required argument ", T.unpack (argName ai), " is missing in method call ", show m, "."]
+            _ -> error "This should never happen: multiple arguments with the same name should have been caught before"
+    return . Just . methodReturnType $ minfo
 
 addTypes :: TypeMap -> [(Int, Expression)] -> NGLess [(Int,Expression)]
 addTypes tmap exprs = mapM (secondM (runNGLess . recursiveTransform addTypes')) exprs

@@ -408,7 +408,7 @@ lazily: i.e., the first time you use them, NGLess will download and cache them.
 NGLess will also index any database used the first time it is used.
 
 The option ``block_size_megabases`` turns on low memory mode (see the
-corresponding section in the `mapping documentation <mapping.html>`__)
+corresponding section in the `mapping documentation <Mapping.html>`__)
 
 The option ``mode_all=True`` can be passed to include all alignments of both
 single and paired-end reads in the output SAM/BAM.
@@ -613,6 +613,8 @@ argument to True.
   feature
 - ``{scaled}`` is the result of the ``{normed}`` mode scaled up so that the
   total number of counts is identical to the ``{raw}`` (within rounding error)
+- ``{fpkm}`` is *fragments per 1000 bp per million fragments*, so it is normalized
+  by both the size of the feature and the number of fragments.
 
 Unmapped inserts are included in the output if ``{include_minus1}`` is true
 (default: ``False``).

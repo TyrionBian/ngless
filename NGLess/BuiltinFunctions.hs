@@ -1,4 +1,4 @@
-{- Copyright 2013-2018 NGLess Authors
+{- Copyright 2013-2020 NGLess Authors
  - License: MIT
  -}
 module BuiltinFunctions
@@ -43,7 +43,13 @@ builtinFunctions =
     ,Function (FuncName "__check_count") (Just NGLMappedReadSet) [] NGLCounts countCheckArgs False []
     ,Function (FuncName "countfile") (Just NGLString) [ArgCheckFileReadable] NGLCounts [] False [FunctionCheckReturnAssigned]
     ,Function (FuncName "write") (Just NGLAny) [] NGLVoid writeArgs False []
+
     ,Function (FuncName "print") (Just NGLAny) [] NGLVoid [] False []
+
+    ,Function (FuncName "read_int") (Just NGLString) [] NGLInteger [ArgInformation "on_empty_return" False NGLInteger []] False []
+    ,Function (FuncName "read_double") (Just NGLString) [] NGLDouble [ArgInformation "on_empty_return" False NGLDouble []] False []
+
+    ,Function (FuncName "__assert") (Just NGLBool) [] NGLVoid [] False []
 
     ,Function (FuncName "__merge_samfiles") (Just (NGList NGLString)) [] NGLMappedReadSet [] False []
     ]
@@ -159,6 +165,12 @@ builtinMethods =
     ,MethodInfo (MethodName "avg_quality") NGLRead Nothing NGLDouble [] True []
     ,MethodInfo (MethodName "fraction_at_least") NGLRead (Just NGLInteger) NGLDouble [] True []
     ,MethodInfo (MethodName "n_to_zero_quality") NGLRead Nothing NGLRead [] True [FunctionCheckMinNGLessVersion (0,8)]
+
+    -- NGLDouble
+    ,MethodInfo (MethodName "to_string") NGLDouble Nothing NGLString [] True []
+
+    -- NGLInteger
+    ,MethodInfo (MethodName "to_string") NGLInteger Nothing NGLString [] True []
     ]
 
 filterArgs =

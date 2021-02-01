@@ -1,4 +1,4 @@
-{- Copyright 2016-2020 NGLess Authors
+{- Copyright 2016-2021 NGLess Authors
  - License: MIT
  -}
 {-# LANGUAGE FlexibleContexts #-}
@@ -90,7 +90,8 @@ checkSimple expr = forM_ expr (checkSimple1 . snd) *> return expr
             Condition{} -> throwShouldNotOccur "Non-simple expression (Condition)"
             Assignment{} -> throwShouldNotOccur "Non-simple expression (Assignment)"
             FunctionCall{} -> throwShouldNotOccur "Non-simple expression (FunctionCall)"
-            MethodCall{} -> throwShouldNotOccur "Non-simple expression (MethodCall)"
+            -- Rewriting for MethodCall is not implemented!
+            MethodCall{} -> return () -- throwShouldNotOccur "Non-simple expression (MethodCall)"
 
             ListExpression s -> mapM_ checkSimple0 s
             UnaryOp _ a -> checkSimple0 a
@@ -317,7 +318,7 @@ addFileChecks' checkFname tag ((lno,e):rest) = do
         maybeAddChecks _ [] = []
         maybeAddChecks vars@[(v,complete)] ((lno',e'):rest') = case e' of
             Assignment v' _
-                | v' == v -> ((lno', checkFileExpression complete):(lno', e'):rest')
+                | v' == v -> (lno', checkFileExpression complete) : (lno', e') : rest'
             _ -> (lno',e') : maybeAddChecks vars rest'
         maybeAddChecks _ rest' = rest'
 
@@ -464,8 +465,8 @@ recursiveCall f (lno, e) = evalCont $ callCC $ \exit -> do
 floatDown :: [Variable] -> (Int, Expression) -> [(Int, Expression)] -> [(Int, Expression)]
 floatDown _ e [] = [e]
 floatDown vars e (c:rest)
-    | any (`isVarUsed1` (snd c)) vars = (e:c:rest)
-    | otherwise = (c:floatDown vars e rest)
+    | any (`isVarUsed1` snd c) vars = e : c : rest
+    | otherwise = c : floatDown vars e rest
 
 -- | Implements addition of temp$nn variables to simplify expressions
 --
@@ -522,6 +523,17 @@ addTemporaries = addTemporaries' 0
                             put (n + 1)
                             tell [Assignment v e]
                             return (Lookup t v)
+                {- The code below seemed like a good idea, but breaks the early
+                 - error checking (as it relies on a very simplistic way of
+                 - "bubbling up" the error checking code:
+                 -
+                functionCallTemp e@BinaryOp{} = do
+                            n <- get
+                            let v = Variable (T.pack $ "temp$"++show n)
+                            put (n + 1)
+                            tell [Assignment v e]
+                            return (Lookup Nothing v)
+                -}
                 functionCallTemp e = return e
 
 {-| Calculation of hashes for output method calls

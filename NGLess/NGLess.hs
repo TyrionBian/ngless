@@ -1,4 +1,7 @@
-{-# LANGUAGE OverloadedStrings, FlexibleContexts #-}
+{- Copyright 2013-2021 NGLess Authors
+ - License: MIT
+ -}
+{-# LANGUAGE FlexibleContexts #-}
 module NGLess
     ( NGLessIO
     , NGLess
@@ -23,6 +26,8 @@ module NGLess
     , lookupStringListOrScriptErrorDef
     , lookupIntegerOrScriptError
     , lookupIntegerOrScriptErrorDef
+    , lookupDoubleOrScriptError
+    , lookupDoubleOrScriptErrorDef
     , lookupSymbolOrScriptError
     , lookupSymbolOrScriptErrorDef
     , lookupSymbolListOrScriptError
@@ -93,6 +98,13 @@ lookupIntegerOrScriptErrorDef defval context name args = case lookup name args o
     Just (NGOInteger v) -> return v
     Just other -> throwScriptError ("Expected an integer in argument " ++ T.unpack name ++ " in context '" ++ context ++ "' instead observed: " ++ show other)
 
+lookupDoubleOrScriptError :: (MonadError NGError m) => String-> T.Text -> KwArgsValues -> m Double
+lookupDoubleOrScriptError = requiredLookup lookupDoubleOrScriptErrorDef
+lookupDoubleOrScriptErrorDef defval context name args = case lookup name args of
+    Nothing -> defval
+    Just (NGODouble v) -> return v
+    Just other -> throwScriptError ("Expected a double in argument " ++ T.unpack name ++ " in context '" ++ context ++ "' instead observed: " ++ show other)
+
 lookupSymbolOrScriptError :: (MonadError NGError m) => String-> T.Text -> KwArgsValues -> m T.Text
 lookupSymbolOrScriptError = requiredLookup lookupSymbolOrScriptErrorDef
 lookupSymbolOrScriptErrorDef defval context name args = case lookup name args of
@@ -117,7 +129,7 @@ decodeSymbolOrError context allowed used = case lookup used allowed of
                                             ++context++".\n"
                                             ++T.unpack (suggestionMessage used (fst <$> allowed))
                                             ++"\nValid values are:"
-                                            ++concat [("\n\t - "++T.unpack val) | (val,_) <- allowed])
+                                            ++concat ["\n\t - "++T.unpack val | (val,_) <- allowed])
 
 
 requiredLookup :: (MonadError NGError m) => (m a -> String-> T.Text -> KwArgsValues -> m a) -> String-> T.Text -> KwArgsValues -> m a
